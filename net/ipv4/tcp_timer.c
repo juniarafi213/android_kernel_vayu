@@ -24,45 +24,13 @@
 
 int sysctl_tcp_thin_linear_timeouts __read_mostly;
 
-static void set_tcp_default(void)
-{
-	sysctl_tcp_delack_seg = TCP_DELACK_SEG;
-}
-
-/*sysctl handler for tcp_ack realted master control */
-int tcp_proc_delayed_ack_control(struct ctl_table *table, int write,
-				 void __user *buffer, size_t *length,
-				 loff_t *ppos)
-{
-	int ret = proc_dointvec_minmax(table, write, buffer, length, ppos);
-
-	/* The ret value will be 0 if the input validation is successful
-	 * and the values are written to sysctl table. If not, the stack
-	 * will continue to work with currently configured values
-	 */
-	return ret;
-}
-
-/*sysctl handler for tcp_ack realted master control */
-int tcp_use_userconfig_sysctl_handler(struct ctl_table *table, int write,
-				      void __user *buffer, size_t *length,
-				      loff_t *ppos)
-{
-	int ret = proc_dointvec_minmax(table, write, buffer, length, ppos);
-
-	if (write && ret == 0) {
-		if (!sysctl_tcp_use_userconfig)
-			set_tcp_default();
-	}
-	return ret;
-}
-
 /**
  *  tcp_write_err() - close socket and save error info
  *  @sk:  The socket the error has appeared on.
  *
  *  Returns: Nothing (void)
  */
+
 static void tcp_write_err(struct sock *sk)
 {
 	sk->sk_err = sk->sk_err_soft ? : ETIMEDOUT;
@@ -428,6 +396,22 @@ static void tcp_fastopen_synack_timer(struct sock *sk)
 			  TCP_TIMEOUT_INIT << req->num_timeout, TCP_RTO_MAX);
 }
 
+static bool tcp_rtx_probe0_timed_out(const struct sock *sk,
+				     const struct sk_buff *skb)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+	const int timeout = TCP_RTO_MAX * 2;
+	u32 rcv_delta, rtx_delta;
+
+	rcv_delta = inet_csk(sk)->icsk_timeout - tp->rcv_tstamp;
+	if (rcv_delta <= timeout)
+		return false;
+
+	rtx_delta = (u32)msecs_to_jiffies(tcp_time_stamp(tp) -
+			(tp->retrans_stamp ?: tcp_skb_timestamp(skb)));
+
+	return rtx_delta > timeout;
+}
 
 /**
  *  tcp_retransmit_timer() - The TCP retransmit timeout handler
@@ -490,7 +474,7 @@ void tcp_retransmit_timer(struct sock *sk)
 					    tp->snd_una, tp->snd_nxt);
 		}
 #endif
-		if (tcp_jiffies32 - tp->rcv_tstamp > TCP_RTO_MAX) {
+		if (tcp_rtx_probe0_timed_out(sk, skb)) {
 			tcp_write_err(sk);
 			goto out;
 		}
@@ -572,7 +556,9 @@ out_reset_timer:
 	    tcp_stream_is_thin(tp) &&
 	    icsk->icsk_retransmits <= TCP_THIN_LINEAR_RETRIES) {
 		icsk->icsk_backoff = 0;
-		icsk->icsk_rto = min(__tcp_set_rto(tp), TCP_RTO_MAX);
+		icsk->icsk_rto = clamp(__tcp_set_rto(tp),
+				       tcp_rto_min(sk),
+				       TCP_RTO_MAX);
 	} else {
 		/* Use normal (exponential) backoff */
 		icsk->icsk_rto = min(icsk->icsk_rto << 1, TCP_RTO_MAX);

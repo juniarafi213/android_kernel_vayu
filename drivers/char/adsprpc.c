@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -608,43 +607,64 @@ static void fastrpc_remote_buf_list_free(struct fastrpc_file *fl)
 	} while (free);
 }
 
-static void fastrpc_mmap_add_global(struct fastrpc_mmap *map)
-{
-	struct fastrpc_apps *me = &gfa;
-	unsigned long irq_flags = 0;
-
-	spin_lock_irqsave(&me->hlock, irq_flags);
-	hlist_add_head(&map->hn, &me->maps);
-	spin_unlock_irqrestore(&me->hlock, irq_flags);
-}
-
 static void fastrpc_mmap_add(struct fastrpc_mmap *map)
 {
-	struct fastrpc_file *fl = map->fl;
+	if (map->flags == ADSP_MMAP_HEAP_ADDR ||
+				map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
+		struct fastrpc_apps *me = &gfa;
 
-	hlist_add_head(&map->hn, &fl->maps);
+		spin_lock(&me->hlock);
+		hlist_add_head(&map->hn, &me->maps);
+		spin_unlock(&me->hlock);
+	} else {
+		struct fastrpc_file *fl = map->fl;
+
+		hlist_add_head(&map->hn, &fl->maps);
+	}
 }
 
 static int fastrpc_mmap_find(struct fastrpc_file *fl, int fd,
 		uintptr_t va, size_t len, int mflags, int refs,
 		struct fastrpc_mmap **ppmap)
 {
+	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_mmap *match = NULL, *map = NULL;
 	struct hlist_node *n;
 
 	if ((va + len) < va)
 		return -EOVERFLOW;
-	hlist_for_each_entry_safe(map, n, &fl->maps, hn) {
-		if (va >= map->va &&
-			va + len <= map->va + map->len &&
-			map->fd == fd) {
-			if (refs) {
-				if (map->refs + 1 == INT_MAX)
-					return -ETOOMANYREFS;
-				map->refs++;
+	if (mflags == ADSP_MMAP_HEAP_ADDR ||
+				 mflags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
+		spin_lock(&me->hlock);
+		hlist_for_each_entry_safe(map, n, &me->maps, hn) {
+			if (va >= map->va &&
+				va + len <= map->va + map->len &&
+				map->fd == fd) {
+				if (refs) {
+					if (map->refs + 1 == INT_MAX) {
+						spin_unlock(&me->hlock);
+						return -ETOOMANYREFS;
+					}
+					map->refs++;
+				}
+				match = map;
+				break;
 			}
-			match = map;
-			break;
+		}
+		spin_unlock(&me->hlock);
+	} else {
+		hlist_for_each_entry_safe(map, n, &fl->maps, hn) {
+			if (va >= map->va &&
+				va + len <= map->va + map->len &&
+				map->fd == fd) {
+				if (refs) {
+					if (map->refs + 1 == INT_MAX)
+						return -ETOOMANYREFS;
+					map->refs++;
+				}
+				match = map;
+				break;
+			}
 		}
 	}
 	if (match) {
@@ -993,9 +1013,8 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd,
 		map->va = va;
 	}
 	map->len = len;
-	if ((mflags != ADSP_MMAP_HEAP_ADDR) &&
-			(mflags != ADSP_MMAP_REMOTE_HEAP_ADDR))
-		fastrpc_mmap_add(map);
+
+	fastrpc_mmap_add(map);
 	*ppmap = map;
 
 bail:
@@ -2303,7 +2322,7 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 		if (!init->filelen)
 			goto bail;
 
-		proc_name = kzalloc(init->filelen, GFP_KERNEL);
+		proc_name = kzalloc(init->filelen + 1, GFP_KERNEL);
 		VERIFY(err, !IS_ERR_OR_NULL(proc_name));
 		if (err)
 			goto bail;
@@ -2335,7 +2354,6 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 			mutex_unlock(&fl->map_mutex);
 			if (err)
 				goto bail;
-			fastrpc_mmap_add_global(mem);
 			phys = mem->phys;
 			size = mem->size;
 			if (me->channel[fl->cid].rhvm.vmid) {
@@ -2784,11 +2802,8 @@ static int fastrpc_mmap_remove_ssr(struct fastrpc_file *fl, int locked)
 		}
 	} while (match);
 bail:
-	if (err && match) {
-		mutex_lock(&fl->map_mutex);
-		fastrpc_mmap_add_global(match);
-		mutex_unlock(&fl->map_mutex);
-	}
+	if (err && match)
+		fastrpc_mmap_add(match);
 	return err;
 }
 
@@ -2908,11 +2923,7 @@ static int fastrpc_internal_munmap(struct fastrpc_file *fl,
 bail:
 	if (err && map) {
 		mutex_lock(&fl->map_mutex);
-		if ((map->flags == ADSP_MMAP_HEAP_ADDR) ||
-				(map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR))
-			fastrpc_mmap_add_global(map);
-		else
-			fastrpc_mmap_add(map);
+		fastrpc_mmap_add(map);
 		mutex_unlock(&fl->map_mutex);
 	}
 	mutex_unlock(&fl->internal_map_mutex);
@@ -3019,9 +3030,6 @@ static int fastrpc_internal_mmap(struct fastrpc_file *fl,
 		if (err)
 			goto bail;
 		map->raddr = raddr;
-		if (ud->flags == ADSP_MMAP_HEAP_ADDR ||
-				ud->flags == ADSP_MMAP_REMOTE_HEAP_ADDR)
-			fastrpc_mmap_add_global(map);
 	}
 	ud->vaddrout = raddr;
  bail:
@@ -4572,15 +4580,16 @@ static int fastrpc_probe(struct platform_device *pdev)
 		if (range.addr && !of_property_read_bool(dev->of_node,
 							 "restrict-access")) {
 			int srcVM[1] = {VMID_HLOS};
-			int destVM[3] = {VMID_HLOS, VMID_SSC_Q6,
+			int destVM[4] = {VMID_HLOS, VMID_MSS_MSA, VMID_SSC_Q6,
 						VMID_ADSP_Q6};
-			int destVMperm[3] = {PERM_READ | PERM_WRITE | PERM_EXEC,
+			int destVMperm[4] = {PERM_READ | PERM_WRITE | PERM_EXEC,
+				PERM_READ | PERM_WRITE | PERM_EXEC,
 				PERM_READ | PERM_WRITE | PERM_EXEC,
 				PERM_READ | PERM_WRITE | PERM_EXEC,
 				};
 
 			VERIFY(err, !hyp_assign_phys(range.addr, range.size,
-					srcVM, 1, destVM, destVMperm, 3));
+					srcVM, 1, destVM, destVMperm, 4));
 			if (err)
 				goto bail;
 			me->range.addr = range.addr;
@@ -4742,6 +4751,7 @@ static struct platform_driver fastrpc_driver = {
 static const struct rpmsg_device_id fastrpc_rpmsg_match[] = {
 	{ FASTRPC_GLINK_GUID },
 	{ FASTRPC_SMD_GUID },
+	{},
 };
 
 static const struct of_device_id fastrpc_rpmsg_of_match[] = {
