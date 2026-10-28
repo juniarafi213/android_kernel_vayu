@@ -592,7 +592,8 @@ endif
 endif # Line 2, ifeq (,,)
 
 dtbo-y := vayu-sm8150-overlay.dtbo
-vayu-sm8150-overlay.dtbo-base := sm8150-v2.dtb
+vayu-sm8150-overlay.dtbo-base := sm8150-v2.dtb sm8150p.dtb sm8150.dtb sm8150p-v2.dtb
+dtb-y += sm8150-v2.dtb sm8150p.dtb sm8150.dtb sm8150p-v2.dtb
 
 ifeq ($(CONFIG_ARM64),y)
 always		:= $(dtb-y)
