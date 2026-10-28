@@ -178,6 +178,13 @@ jobs:
 
           echo "Packaging kernel with AnyKernel3..."
           cp "$OUT_DIR/arch/arm64/boot/Image" "$ANYKERNEL_DIR/Image"
+          cat "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150-v2.dtb" \
+              "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150p.dtb" \
+              "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150.dtb" \
+              "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150p-v2.dtb" > "$ANYKERNEL_DIR/dtb.img"
+          if [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ]; then
+            cp "$OUT_DIR/arch/arm64/boot/dtbo.img" "$ANYKERNEL_DIR/dtbo.img"
+          fi
 
           cd "$ANYKERNEL_DIR"
           zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" ./* -x ".git*" -x ".github*" -x "README.md" -x "LICENSE*" >/dev/null
