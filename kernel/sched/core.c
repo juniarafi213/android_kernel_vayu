@@ -67,7 +67,7 @@ const_debug unsigned int sysctl_sched_features =
  * Number of tasks to iterate in a single balance run.
  * Limited because this is done with IRQs disabled.
  */
-const_debug unsigned int sysctl_sched_nr_migrate = NR_CPUS;
+const_debug unsigned int sysctl_sched_nr_migrate = 32;
 
 /*
  * period over which we average the RT time consumption, measured
@@ -1370,47 +1370,6 @@ out:
 }
 
 /*
- * Calls to sched_migrate_to_cpumask_start() cannot nest. This can only be used
- * in process context.
- */
-void sched_migrate_to_cpumask_start(struct cpumask *old_mask,
-				    const struct cpumask *dest)
-{
-	struct task_struct *p = current;
-
-	raw_spin_lock_irq(&p->pi_lock);
-	*cpumask_bits(old_mask) = *cpumask_bits(&p->cpus_allowed);
-	raw_spin_unlock_irq(&p->pi_lock);
-
-	/*
-	 * This will force the current task onto the destination cpumask. It
-	 * will sleep when a migration to another CPU is actually needed.
-	 */
-	set_cpus_allowed_ptr(p, dest);
-}
-
-void sched_migrate_to_cpumask_end(const struct cpumask *old_mask,
-				  const struct cpumask *dest)
-{
-	struct task_struct *p = current;
-
-	/*
-	 * Check that cpus_allowed didn't change from what it was temporarily
-	 * set to earlier. If so, we can go ahead and lazily restore the old
-	 * cpumask. There's no need to immediately migrate right now.
-	 */
-	raw_spin_lock_irq(&p->pi_lock);
-	if (*cpumask_bits(&p->cpus_allowed) == *cpumask_bits(dest)) {
-		struct rq *rq = this_rq();
-
-		raw_spin_lock(&rq->lock);
-		do_set_cpus_allowed(p, old_mask);
-		raw_spin_unlock(&rq->lock);
-	}
-	raw_spin_unlock_irq(&p->pi_lock);
-}
-
-/*
  * wait_task_inactive - wait for a thread to unschedule.
  *
  * If @match_state is nonzero, it's the @p->state value just checked and
@@ -2457,6 +2416,11 @@ static void sched_post_fork_bore(struct task_struct *p) {
 		inherit_burst(p);
 	p->se.burst_penalty = p->se.prev_burst_penalty;
 }
+
+void sched_post_fork(struct task_struct *p)
+{
+	sched_post_fork_bore(p);
+}
 #endif // CONFIG_SCHED_BORE
 
 /*
@@ -2547,7 +2511,7 @@ void set_numabalancing_state(bool enabled)
 
 #ifdef CONFIG_PROC_SYSCTL
 int sysctl_numa_balancing(struct ctl_table *table, int write,
-			 void __user *buffer, size_t *lenp, loff_t *ppos)
+			  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct ctl_table t;
 	int err;
@@ -2621,8 +2585,8 @@ static void __init init_schedstats(void)
 }
 
 #ifdef CONFIG_PROC_SYSCTL
-int sysctl_schedstats(struct ctl_table *table, int write,
-			 void __user *buffer, size_t *lenp, loff_t *ppos)
+int sysctl_schedstats(struct ctl_table *table, int write, void *buffer,
+		size_t *lenp, loff_t *ppos)
 {
 	struct ctl_table t;
 	int err;
@@ -2732,14 +2696,6 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 	put_cpu();
 	return 0;
-}
-
-
-void sched_post_fork(struct task_struct *p)
-{
-#ifdef CONFIG_SCHED_BORE
-	sched_post_fork_bore(p);
-#endif // CONFIG_SCHED_BORE
 }
 
 unsigned long to_ratio(u64 period, u64 runtime)
@@ -2921,50 +2877,6 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 	prepare_arch_switch(next);
 }
 
-void release_task_stack(struct task_struct *tsk);
-static void task_async_free(struct work_struct *work)
-{
-	struct task_struct *t = container_of(work, typeof(*t), async_free.work);
-	bool free_stack = READ_ONCE(t->async_free.free_stack);
-
-	atomic_set(&t->async_free.running, 0);
-
-	if (free_stack) {
-		release_task_stack(t);
-		put_task_struct(t);
-	} else {
-		__put_task_struct(t);
-	}
-}
-
-static void finish_task_switch_dead(struct task_struct *prev)
-{
-	if (atomic_cmpxchg(&prev->async_free.running, 0, 1)) {
-		put_task_stack(prev);
-		put_task_struct(prev);
-		return;
-	}
-
-	if (atomic_dec_and_test(&prev->stack_refcount)) {
-		prev->async_free.free_stack = true;
-	} else if (atomic_dec_and_test(&prev->usage)) {
-		prev->async_free.free_stack = false;
-	} else {
-		atomic_set(&prev->async_free.running, 0);
-		return;
-	}
-
-	INIT_WORK(&prev->async_free.work, task_async_free);
-	queue_work(system_unbound_wq, &prev->async_free.work);
-}
-
-static void mmdrop_async_free(struct work_struct *work)
-{
-	struct mm_struct *mm = container_of(work, typeof(*mm), async_put_work);
-
-	__mmdrop(mm);
-}
-
 /**
  * finish_task_switch - clean up after a task-switch
  * @prev: the thread we just switched away from.
@@ -3038,10 +2950,8 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	kcov_finish_switch(current);
 
 	fire_sched_in_preempt_notifiers(current);
-	if (mm && atomic_dec_and_test(&mm->mm_count)) {
-		INIT_WORK(&mm->async_put_work, mmdrop_async_free);
-		queue_work(system_unbound_wq, &mm->async_put_work);
-	}
+	if (mm)
+		mmdrop(mm);
 	if (unlikely(prev_state  == TASK_DEAD)) {
 			if (prev->sched_class->task_dead)
 				prev->sched_class->task_dead(prev);
@@ -3052,7 +2962,11 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 			 */
 			kprobe_flush_task(prev);
 
-			finish_task_switch_dead(prev);
+			/* Task is done with its stack. */
+			put_task_stack(prev);
+
+			put_task_struct(prev);
+
 	}
 
 	tick_nohz_task_switch();
@@ -5102,11 +5016,32 @@ out_unlock:
 	return retval;
 }
 
+static bool task_is_unity_game(struct task_struct *p)
+{
+	struct task_struct *t;
+	bool ret = false;
+
+	/* Filter for Android user applications (i.e., positive adj) */
+	if (p->signal->oom_score_adj >= 0) {
+		rcu_read_lock();
+		for_each_thread(p, t) {
+			/* Check for a UnityMain thread in the thread group */
+			if (!strcmp(t->comm, "UnityMain") || !strcmp(t->comm, "UnityGfxDeviceW")) {
+				ret = true;
+				break;
+			}
+		}
+		rcu_read_unlock();
+	}
+
+	return ret;
+}
+
 long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 {
 	cpumask_var_t cpus_allowed, new_mask;
 	struct task_struct *p;
-	int retval;
+	int retval = 0;
 	int dest_cpu;
 	cpumask_t allowed_mask;
 
@@ -5121,6 +5056,20 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	/* Prevent p going away */
 	get_task_struct(p);
 	rcu_read_unlock();
+
+	/*
+	 * Unity-based games like to shoot themselves in the foot by setting a
+	 * nonsense CPU affinity, restricting the game to a narrow set of CPU
+	 * cores that it thinks are the "big" cores in a heterogeneous CPU. It
+	 * assumes that CPUs only have two performance domains (clusters), and
+	 * therefore royally mucks up games' CPU affinities on CPUs which have
+	 * more than two performance domains.
+	 *
+	 * Check if the target task is part of a Unity-based game and silently
+	 * ignore the setaffinity request so that it can't sabotage itself.
+	 */
+	if (task_is_unity_game(p))
+		goto out_put_task;
 
 	if (p->flags & PF_NO_SETAFFINITY) {
 		retval = -EINVAL;
@@ -6674,8 +6623,9 @@ void __init sched_init(void)
 
 #ifdef CONFIG_SCHED_BORE
 	sched_init_bore();
-	printk(KERN_INFO "BORE (Burst-Oriented Response Enhancer) CPU Scheduler modification 4.2.4 by Masahito Suzuki");
+	printk(KERN_INFO "BORE (Burst-Oriented Response Enhancer) CPU Scheduler modification 4.2.4 by Masahito Suzuki\n");
 #endif // CONFIG_SCHED_BORE
+
 	sched_clock_init();
 	wait_bit_init();
 
@@ -6928,6 +6878,34 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
 }
 EXPORT_SYMBOL(___might_sleep);
+
+void __cant_sleep(const char *file, int line, int preempt_offset)
+{
+	static unsigned long prev_jiffy;
+
+	if (irqs_disabled())
+		return;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_COUNT))
+		return;
+
+	if (preempt_count() > preempt_offset)
+		return;
+
+	if (time_before(jiffies, prev_jiffy + HZ) && prev_jiffy)
+		return;
+	prev_jiffy = jiffies;
+
+	printk(KERN_ERR "BUG: assuming atomic context at %s:%d\n", file, line);
+	printk(KERN_ERR "in_atomic(): %d, irqs_disabled(): %d, pid: %d, name: %s\n",
+			in_atomic(), irqs_disabled(),
+			current->pid, current->comm);
+
+	debug_show_held_locks(current);
+	dump_stack();
+	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
+}
+EXPORT_SYMBOL_GPL(__cant_sleep);
 #endif
 
 #ifdef CONFIG_MAGIC_SYSRQ
