@@ -6,16 +6,16 @@ on:
       branch:
         description: "Branch kernel yang ingin di-build"
         required: true
-        default: "caf-bore"
+        default: "16-bore"
       toolchain:
         description: "Pilihan Toolchain Clang"
         required: true
         type: choice
         options:
-          - "Neutron-Clang"
           - "AOSP-Clang-r510928"
           - "AOSP-Clang-r547379"
-        default: "Neutron-Clang"
+          - "Neutron-Clang"
+        default: "AOSP-Clang-r510928"
       enable_ksun:
         description: "Suntik KernelSU-Next"
         required: false
@@ -24,7 +24,7 @@ on:
       ksun_branch:
         description: "Branch KernelSU-Next (jika diaktifkan)"
         required: false
-        default: "next"
+        default: "legacy"
       disable_lto:
         description: "Nonaktifkan LTO (Build lebih cepat & hemat RAM)"
         required: false
@@ -91,10 +91,13 @@ jobs:
       - name: Setup KernelSU-Next
         if: ${{ github.event.inputs.enable_ksun == 'true' || github.event.inputs.enable_ksun == true }}
         run: |
-          echo "Setting up KernelSU-Next (branch: ${{ github.event.inputs.ksun_branch }})..."
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksun_branch }}"
+          KSUN_TARGET="${{ github.event.inputs.ksun_branch || 'legacy' }}"
+          echo "Setting up KernelSU-Next (branch/tag: $KSUN_TARGET)..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSUN_TARGET"
           echo "CONFIG_KSU=y" >> arch/arm64/configs/vayu_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vayu_defconfig 2>/dev/null || true
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vayu_defconfig
+          echo "# CONFIG_KPROBES is not set" >> arch/arm64/configs/vayu_defconfig
+          echo "# CONFIG_KRETPROBES is not set" >> arch/arm64/configs/vayu_defconfig
 
       - name: Configure Defconfig & LTO
         run: |
@@ -179,7 +182,20 @@ jobs:
 
           echo "Packaging kernel with AnyKernel3..."
           cp "$OUT_DIR/arch/arm64/boot/Image" "$ANYKERNEL_DIR/Image"
-          find "$OUT_DIR/arch/arm64/boot/dts/qcom" -name 'sm8150-v2*.dtb' -exec cat {} + > "$ANYKERNEL_DIR/dtb"
+          if [ -f "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150-v2-xiaomi.dtb" ]; then
+            cat "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150-v2-xiaomi.dtb" \
+                "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150p-xiaomi.dtb" \
+                "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb" \
+                "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150p-v2-xiaomi.dtb" > "$ANYKERNEL_DIR/dtb.img"
+          elif [ -f "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150-v2.dtb" ]; then
+            cat "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150-v2.dtb" \
+                "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150p.dtb" \
+                "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150.dtb" \
+                "$OUT_DIR/arch/arm64/boot/dts/qcom/sm8150p-v2.dtb" > "$ANYKERNEL_DIR/dtb.img"
+          else
+            find "$OUT_DIR/arch/arm64/boot/dts/qcom" -name '*sm8150*.dtb' -exec cat {} + > "$ANYKERNEL_DIR/dtb.img"
+          fi
+          cp -f "$ANYKERNEL_DIR/dtb.img" "$ANYKERNEL_DIR/dtb" 2>/dev/null || true
           if [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ]; then
             cp "$OUT_DIR/arch/arm64/boot/dtbo.img" "$ANYKERNEL_DIR/dtbo.img"
           fi
