@@ -40,13 +40,25 @@ config CFQ_GROUP_IOSCHED
 	---help---
 	  Enable group IO scheduling in CFQ.
 
+config IOSCHED_ANXIETY
+	tristate "Anxiety I/O scheduler"
+	default y
+	---help---
+	  The Anxiety I/O scheduler is a lightweight block layer scheduler
+	  designed for flash-based storage (UFS/eMMC) that prioritizes
+	  latency and responsiveness over throughput, with strong preference
+	  for read operations.
+
 choice
 
 	prompt "Default I/O scheduler"
-	default DEFAULT_CFQ
+	default DEFAULT_ANXIETY
 	help
 	  Select the I/O scheduler which will be used by default for all
 	  block devices.
+
+	config DEFAULT_ANXIETY
+		bool "Anxiety" if IOSCHED_ANXIETY=y
 
 	config DEFAULT_DEADLINE
 		bool "Deadline" if IOSCHED_DEADLINE=y
@@ -61,6 +73,7 @@ endchoice
 
 config DEFAULT_IOSCHED
 	string
+	default "anxiety" if DEFAULT_ANXIETY
 	default "deadline" if DEFAULT_DEADLINE
 	default "cfq" if DEFAULT_CFQ
 	default "noop" if DEFAULT_NOOP
