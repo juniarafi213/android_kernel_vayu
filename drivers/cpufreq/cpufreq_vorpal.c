@@ -2104,7 +2104,6 @@ static struct attribute *rfx_attrs[] = {
 	&thermal_zone.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(rfx);
 
 static void rfx_tunables_free(struct kobject *kobj)
 {
@@ -2117,7 +2116,7 @@ static void rfx_tunables_free(struct kobject *kobj)
  * see rfx_gaming_attr().
  */
 static struct kobj_type rfx_ktype = {
-	.default_groups = rfx_groups,
+	.default_attrs = rfx_attrs,
 	.sysfs_ops = &governor_sysfs_ops,
 	.release = rfx_tunables_free,
 };
@@ -2466,7 +2465,7 @@ static void rfx_limits(struct cpufreq_policy *policy)
 static struct cpufreq_governor vorpal_gov = {
 	.name = CPUFREQ_VORPAL_NAME,
 	.owner = THIS_MODULE,
-	.flags = CPUFREQ_GOV_DYNAMIC_SWITCHING,
+	.dynamic_switching = true,
 	.init = rfx_init,
 	.exit = rfx_exit,
 	.start = rfx_start,
