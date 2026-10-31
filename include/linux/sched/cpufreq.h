@@ -29,6 +29,9 @@ void cpufreq_add_update_util_hook(int cpu, struct update_util_data *data,
                        void (*func)(struct update_util_data *data, u64 time,
 				    unsigned int flags));
 void cpufreq_remove_update_util_hook(int cpu);
+
+struct sched_walt_cpu_load;
+unsigned long boosted_cpu_util(int cpu, struct sched_walt_cpu_load *walt_load);
 #endif /* CONFIG_CPU_FREQ */
 
 #endif /* _LINUX_SCHED_CPUFREQ_H */

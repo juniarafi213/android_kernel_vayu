@@ -168,22 +168,20 @@ unsigned int sched_get_cpu_util(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
 	u64 util;
-	unsigned long capacity, flags;
+	unsigned long capacity;
 	unsigned int busy;
 
-	raw_spin_lock_irqsave(&rq->lock, flags);
-
-	util = rq->cfs.avg.util_avg;
+	util = READ_ONCE(rq->cfs.avg.util_avg);
 	capacity = capacity_orig_of(cpu);
 
 #ifdef CONFIG_SCHED_WALT
 	if (!walt_disabled && sysctl_sched_use_walt_cpu_util) {
-		util = rq->prev_runnable_sum + rq->grp_time.prev_runnable_sum;
+		util = READ_ONCE(rq->prev_runnable_sum) +
+		       READ_ONCE(rq->grp_time.prev_runnable_sum);
 		util = div64_u64(util,
 				 sched_ravg_window >> SCHED_CAPACITY_SHIFT);
 	}
 #endif
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	util = (util >= capacity) ? capacity : util;
 	busy = div64_ul((util * 100), capacity);

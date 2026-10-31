@@ -87,12 +87,10 @@ static inline unsigned int cpumask_last(const struct cpumask *srcp)
 /* Sched-core helpers (owned by core sched): util getter, DL-bandwidth check,
  * SUGOV DL class setter for the slow-path worker.
  *
- * NOTE (Vayu/4.14 port): sched_get_cpu_util() returns a percentage (0-100),
- * NOT a capacity-scale value (0-1024). We convert it here to the 0..max_cap
- * range so that all downstream headroom math and freq selection work correctly.
- * boosted_cpu_util() is unavailable outside kernel/sched; this path uses the
- * raw WALT util (via sched_get_cpu_util) and adds the 25% DVFS headroom that
- * rfx_get_util_vayu owns.
+ * NOTE (Vayu/4.14 port): Use boosted_cpu_util(cpu, NULL) which is lockless
+ * and native to Qualcomm WALT/SchedTune (same metric used by cpufreq_schedutil).
+ * sched_get_cpu_util() took rq->lock, causing an immediate recursive spinlock
+ * deadlock inside cpufreq_update_util (which runs with rq->lock already held).
  */
 static inline void rfx_get_util_vayu(int cpu, unsigned long boost,
 				     unsigned long *out_util, unsigned long *out_bw_min)
@@ -103,13 +101,7 @@ static inline void rfx_get_util_vayu(int cpu, unsigned long boost,
 	if (unlikely(!max_cap))
 		max_cap = SCHED_CAPACITY_SCALE;
 
-	/*
-	 * sched_get_cpu_util() returns 0-100 (percent busy relative to capacity).
-	 * Convert to 0..max_cap scale so the result is directly comparable to
-	 * arch_scale_cpu_capacity() values used everywhere else in Vorpal.
-	 */
-	util = (unsigned long)sched_get_cpu_util(cpu);
-	util = min_t(unsigned long, util * max_cap / 100, max_cap);
+	util = boosted_cpu_util(cpu, NULL);
 
 	if (boost > util)
 		util = boost;

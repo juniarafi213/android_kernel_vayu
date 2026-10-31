@@ -6911,6 +6911,7 @@ boosted_cpu_util(int cpu, struct sched_walt_cpu_load *walt_load)
 
 	return util + margin;
 }
+EXPORT_SYMBOL_GPL(boosted_cpu_util);
 
 static inline unsigned long
 boosted_task_util(struct task_struct *task)
