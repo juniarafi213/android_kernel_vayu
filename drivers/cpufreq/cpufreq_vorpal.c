@@ -42,8 +42,22 @@
 #include <linux/sched/stat.h>
 #include <linux/arch_topology.h>
 
-#ifndef arch_scale_cpu_capacity
+/*
+ * In Linux 4.14 arm64, arch_scale_cpu_capacity is defined in asm/topology.h
+ * as topology_get_cpu_scale (taking 2 args: sd, cpu). Override it with a
+ * single-arg helper matching 5.10+ Vorpal conventions.
+ */
+#ifdef arch_scale_cpu_capacity
+#undef arch_scale_cpu_capacity
+#endif
 #define arch_scale_cpu_capacity(cpu) topology_get_cpu_scale(NULL, cpu)
+
+/*
+ * Thermal pressure was introduced in Linux 5.7+. On 4.14, Qualcomm uses
+ * policy->max throttling, so stub thermal pressure to 0.
+ */
+#ifndef arch_scale_thermal_pressure
+#define arch_scale_thermal_pressure(cpu) 0UL
 #endif
 
 #define CREATE_TRACE_POINTS
@@ -54,21 +68,38 @@
 #define CPUFREQ_VORPAL_AUTHOR   "Templar Dev"
 
 /* Sched-core helpers (owned by core sched): util getter, DL-bandwidth check,
- * SUGOV DL class setter for the slow-path worker. */
+ * SUGOV DL class setter for the slow-path worker.
+ *
+ * NOTE (Vayu/4.14 port): sched_get_cpu_util() returns a percentage (0-100),
+ * NOT a capacity-scale value (0-1024). We convert it here to the 0..max_cap
+ * range so that all downstream headroom math and freq selection work correctly.
+ * boosted_cpu_util() is unavailable outside kernel/sched; this path uses the
+ * raw WALT util (via sched_get_cpu_util) and adds the 25% DVFS headroom that
+ * rfx_get_util_vayu owns.
+ */
 static inline void rfx_get_util_vayu(int cpu, unsigned long boost,
 				     unsigned long *out_util, unsigned long *out_bw_min)
 {
 	unsigned long util, max_cap;
 
-	max_cap = topology_get_cpu_scale(NULL, cpu);
-	util = sched_get_cpu_util(cpu);
+	max_cap = arch_scale_cpu_capacity(cpu);
+	if (unlikely(!max_cap))
+		max_cap = SCHED_CAPACITY_SCALE;
+
+	/*
+	 * sched_get_cpu_util() returns 0-100 (percent busy relative to capacity).
+	 * Convert to 0..max_cap scale so the result is directly comparable to
+	 * arch_scale_cpu_capacity() values used everywhere else in Vorpal.
+	 */
+	util = (unsigned long)sched_get_cpu_util(cpu);
+	util = min_t(unsigned long, util * max_cap / 100, max_cap);
 
 	if (boost > util)
 		util = boost;
 
 	*out_bw_min = 0;
 
-	/* 25% DVFS headroom */
+	/* 25% DVFS headroom — stacks on schedutil-side boosts (iowait, etc.) */
 	util = util + (util >> 2);
 
 	*out_util = min(util, max_cap);
@@ -255,7 +286,7 @@ static inline bool rfx_dl_bw_exceeded_vayu(int cpu, unsigned long bwmin)
 					 RFX_EMA_DECAY_PERIOD_NS)	/* one frame gap */
 
 /* Headroom above demand, percent. Stacks on the 25% DVFS margin already
- * applied by rfx_get_util_gki510, so this only raises the resting OPP.
+ * applied by rfx_get_util_vayu, so this only raises the resting OPP.
  * Daily 0/0 = no voltage overhead: benchmark multicore regressed when these
  * were nonzero (the surplus sat a full OPP above the load), so the DVFS
  * margin and the daily caps own the daily shape. */
