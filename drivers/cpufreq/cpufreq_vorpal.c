@@ -41,6 +41,7 @@
 #endif
 #include <linux/sched/stat.h>
 #include <linux/arch_topology.h>
+#include <trace/events/power.h>
 
 /*
  * In Linux 4.14 arm64, arch_scale_cpu_capacity is defined in asm/topology.h
@@ -1762,6 +1763,7 @@ static void rfx_update(struct update_util_data *hook, u64 time,
 	unsigned long irqflags;
 	unsigned int next_f;
 	bool do_deferred = false;
+	unsigned int j;
 
 	raw_spin_lock_irqsave(&p->update_lock, irqflags);
 
@@ -1785,8 +1787,15 @@ static void rfx_update(struct update_util_data *hook, u64 time,
 			/* Inside update_lock: the call may not run twice in
 			 * parallel for one policy. */
 			if (p->policy->fast_switch_enabled) {
-				cpufreq_driver_fast_switch(p->policy,
-							   p->next_freq);
+				unsigned int real_freq;
+
+				real_freq = cpufreq_driver_fast_switch(p->policy,
+								       p->next_freq);
+				if (real_freq) {
+					p->policy->cur = real_freq;
+					for_each_cpu(j, p->policy->cpus)
+						trace_cpu_frequency(real_freq, j);
+				}
 			} else if (!p->work_in_progress) {
 				p->work_in_progress = true;
 				do_deferred = true;
@@ -2415,7 +2424,7 @@ static int rfx_start(struct cpufreq_policy *policy)
 
 	/* Not yet on the policy list, so nothing can race the hook here. */
 	rfx_reset_policy_locked(p);
-	p->need_freq_update = false;
+	p->need_freq_update = true;
 
 	spin_lock_irqsave(&rfx_policy_list_lock, flags);
 	list_add(&p->gov_node, &rfx_policy_list);
@@ -2461,11 +2470,23 @@ static void rfx_stop(struct cpufreq_policy *policy)
 static void rfx_limits(struct cpufreq_policy *policy)
 {
 	struct rfx_policy *p = policy->governor_data;
+	unsigned long flags;
+	unsigned int ret;
+	int cpu;
 
 	if (!policy->fast_switch_enabled) {
 		mutex_lock(&p->work_lock);
 		cpufreq_policy_apply_limits(policy);
 		mutex_unlock(&p->work_lock);
+	} else {
+		raw_spin_lock_irqsave(&p->update_lock, flags);
+		ret = cpufreq_policy_apply_limits_fast(policy);
+		if (ret && policy->cur != ret) {
+			policy->cur = ret;
+			for_each_cpu(cpu, policy->cpus)
+				trace_cpu_frequency(ret, cpu);
+		}
+		raw_spin_unlock_irqrestore(&p->update_lock, flags);
 	}
 	smp_wmb();
 	WRITE_ONCE(p->limits_changed, true);
