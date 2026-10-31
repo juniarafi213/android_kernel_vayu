@@ -60,6 +60,23 @@
 #define arch_scale_thermal_pressure(cpu) 0UL
 #endif
 
+/*
+ * cpumask_last was introduced in Linux 5.3+. Emulate with find_last_bit.
+ */
+#ifndef cpumask_last
+static inline unsigned int cpumask_last(const struct cpumask *srcp)
+{
+	return find_last_bit(cpumask_bits(srcp), nr_cpumask_bits);
+}
+#endif
+
+/*
+ * cpufreq_this_cpu_can_update was renamed from cpufreq_can_do_remote_dvfs in Linux 5.x.
+ */
+#ifndef cpufreq_this_cpu_can_update
+#define cpufreq_this_cpu_can_update(policy) cpufreq_can_do_remote_dvfs(policy)
+#endif
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/vorpal.h>
 
