@@ -224,6 +224,14 @@ static inline bool rfx_dl_bw_exceeded_vayu(int cpu, unsigned long bwmin)
 #define RFX_D_BIG_SUSTAINED_CAP_PCT	62
 #define RFX_D_PRIME_SUSTAINED_CAP_PCT	62
 
+/* Daily touch interaction floor (Pillar 2). Responsive scrolling & UI launch
+ * without jank: arms a gentle floor across clusters while the screen is being
+ * touched, releasing immediately back to idle when released. */
+#define RFX_D_TOUCH_MS_DEFAULT		100	/* input window length */
+#define RFX_D_TOUCH_LITTLE_FLOOR_PCT	45	/* ~800 MHz: compositor & IME */
+#define RFX_D_TOUCH_BIG_FLOOR_PCT	40	/* ~960 MHz: UI inflate & render */
+#define RFX_D_TOUCH_PRIME_FLOOR_PCT	35	/* ~1.05 GHz: background UI tasks */
+
 /* ---- Daily-only power features: applied while gaming_mode=0, inert while
  * gaming (the gaming band never reads them). Any 0 disables at build. ---- */
 /* Adaptive idle eval: poll slower while parked at fmin (never below tunable).
@@ -1371,6 +1379,19 @@ static unsigned int rfx_target_freq(struct rfx_policy *p, unsigned long util,
 		}
 	} else {
 		unsigned int cap, demand_pct;
+#if RFX_D_TOUCH_MS_DEFAULT
+		unsigned int touch_fl = 0;
+		u64 ts = (u64)atomic64_read(&rfx_input_ts);
+
+		if (ts && rfx_elapsed(time, ts) <
+		      (u64)RFX_D_TOUCH_MS_DEFAULT * NSEC_PER_MSEC) {
+			unsigned int fl_pct = little ?
+				RFX_D_TOUCH_LITTLE_FLOOR_PCT :
+				(prime ? RFX_D_TOUCH_PRIME_FLOOR_PCT :
+					 RFX_D_TOUCH_BIG_FLOOR_PCT);
+			touch_fl = rfx_pct(fceil, fl_pct);
+		}
+#endif
 
 		/* Raw demand, before headroom: post-headroom util is stepped by
 		 * tier, so a crossing jumps the value with no load change. Same
@@ -1429,6 +1450,10 @@ static unsigned int rfx_target_freq(struct rfx_policy *p, unsigned long util,
 
 		if (freq > cap)
 			freq = cap;
+#if RFX_D_TOUCH_MS_DEFAULT
+		if (touch_fl && freq < touch_fl)
+			freq = min(touch_fl, cap);
+#endif
 	}
 
 	freq = rfx_thermal_clamp(freq, fceil);
@@ -1584,19 +1609,36 @@ static inline void rfx_pol_up_delay(struct rfx_policy *p, bool gaming)
 
 /* Eval delay for this update. Set BEFORE rfx_should_update_freq, so it may only
  * depend on state known without util. */
-static inline void rfx_set_eval_delay(struct rfx_policy *p, bool gaming)
+static inline void rfx_set_eval_delay(struct rfx_policy *p, u64 time, bool gaming)
 {
 	s64 base;
+#if RFX_D_TOUCH_MS_DEFAULT
+	u64 ts;
+	bool touch_active = false;
+#endif
 
 	if (gaming) {
 		p->freq_update_delay_ns =
 			(s64)RFX_G_EVAL_US_DEFAULT * NSEC_PER_USEC;
 		return;
 	}
+
+#if RFX_D_TOUCH_MS_DEFAULT
+	ts = (u64)atomic64_read(&rfx_input_ts);
+	if (ts && rfx_elapsed(time, ts) <
+	    (u64)RFX_D_TOUCH_MS_DEFAULT * NSEC_PER_MSEC)
+		touch_active = true;
+
+	if (touch_active && p->parked)
+		p->need_freq_update = true;
+#endif
+
 	base = (s64)p->tunables->rate_limit_us * NSEC_PER_USEC;
 	/* Adaptive idle: poll slower while parked at fmin, never below tunable.
-	 * Uses last-committed freq only -- known without this eval's util. */
-	if (RFX_D_IDLE_EVAL_US && p->next_freq == p->policy->cpuinfo.min_freq) {
+	 * Uses last-committed freq only -- known without this eval's util.
+	 * Bypassed during touch so wake from fmin is immediate. */
+	if (!touch_active && RFX_D_IDLE_EVAL_US &&
+	    p->next_freq == p->policy->cpuinfo.min_freq) {
 		p->freq_update_delay_ns =
 			(s64)RFX_D_IDLE_EVAL_US * NSEC_PER_USEC;
 		return;
@@ -1604,7 +1646,7 @@ static inline void rfx_set_eval_delay(struct rfx_policy *p, bool gaming)
 	/* Light load: stretch the cadence down to LIGHT_EVAL_US as the committed
 	 * OPP falls below LIGHT_EVAL_OPP_PCT. Above it the tunable owns the
 	 * rate untouched. Parked fmin handled above keeps the full idle stretch. */
-	if (RFX_D_LIGHT_EVAL_US && p->next_freq <
+	if (!touch_active && RFX_D_LIGHT_EVAL_US && p->next_freq <
 	    rfx_pct(p->policy->cpuinfo.max_freq, RFX_D_LIGHT_EVAL_OPP_PCT)) {
 		unsigned int opp_pct = (unsigned int)((u64)p->next_freq * 100 /
 					p->policy->cpuinfo.max_freq);
@@ -1727,8 +1769,18 @@ static unsigned int rfx_next_freq(struct rfx_cpu *rfx_c, u64 time, bool gaming)
 	 */
 	if (!gaming) {
 		unsigned int fmin = p->policy->cpuinfo.min_freq;
+#if RFX_D_TOUCH_MS_DEFAULT
+		u64 ts = (u64)atomic64_read(&rfx_input_ts);
+		bool touch_active = ts && rfx_elapsed(time, ts) <
+			(u64)RFX_D_TOUCH_MS_DEFAULT * NSEC_PER_MSEC;
+#else
+		bool touch_active = false;
+#endif
 
-		if (p->filt_util < (max_cap >> 5)) {
+		if (touch_active) {
+			p->parked = false;
+			p->park_exit_count = 0;
+		} else if (p->filt_util < (max_cap >> 5)) {
 			p->parked = true;
 			p->park_exit_count = 0;
 		} else if (p->parked) {
@@ -1775,7 +1827,7 @@ static void rfx_update(struct update_util_data *hook, u64 time,
 		rfx_iowait_boost(rfx_c, time, flags);
 	rfx_c->last_update = time;
 	rfx_ignore_dl_rate_limit(rfx_c);
-	rfx_set_eval_delay(p, gaming);
+	rfx_set_eval_delay(p, time, gaming);
 
 	if (rfx_should_update_freq(p, time)) {
 		p->last_eval_time = time;
@@ -2763,9 +2815,9 @@ static void __init rfx_selfcheck(void)
 }
 
 /* ===================================================================== */
-/* Input handler (Feature 2): stamp the last touch/key time while gaming.   */
+/* Input handler (Feature 2): stamp the last touch/key time.                 */
 /* sched_clock keeps the stamp on the same time base the governor compares   */
-/* against; the F2 floor consumes it only while gaming_mode=1.               */
+/* against; consumed by gaming F2 floor and daily touch interaction floor.   */
 /* ===================================================================== */
 
 static bool rfx_input_registered;
@@ -2773,8 +2825,7 @@ static bool rfx_input_registered;
 static void rfx_input_event(struct input_handle *handle, unsigned int type,
 			    unsigned int code, int value)
 {
-	if (rfx_gaming_enabled())
-		atomic64_set(&rfx_input_ts, (s64)sched_clock());
+	atomic64_set(&rfx_input_ts, (s64)sched_clock());
 }
 
 static int rfx_input_connect(struct input_handler *handler,
