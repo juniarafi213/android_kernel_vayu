@@ -792,8 +792,14 @@ unsigned int system_cur_avail_buffers(void)
 	pagecache -= min(pagecache / 2, wmark_low);
 	buffers += pagecache;
 
-	reclaimable = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B) +
-		global_node_page_state(NR_KERNEL_MISC_RECLAIMABLE);
+#ifdef NR_SLAB_RECLAIMABLE_B
+	reclaimable = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
+#else
+	reclaimable = global_node_page_state(NR_SLAB_RECLAIMABLE);
+#endif
+#ifdef NR_KERNEL_MISC_RECLAIMABLE
+	reclaimable += global_node_page_state(NR_KERNEL_MISC_RECLAIMABLE);
+#endif
 	buffers += reclaimable - min(reclaimable / 2, wmark_low);
 
 	if (buffers < 0)

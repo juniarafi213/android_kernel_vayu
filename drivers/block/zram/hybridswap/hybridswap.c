@@ -7,6 +7,8 @@
 
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/genhd.h>
+#include <linux/random.h>
 #include <linux/sched/task.h>
 #include <linux/delay.h>
 #include <linux/spinlock.h>

@@ -19,10 +19,10 @@
 
 #define dev_to_zram(dev) ((struct zram *)dev_to_disk(dev)->private_data)
 
-#define zram_get_handle(zram, index) ((zram)->table[(index)].handle)
+#define zram_get_handle(zram, index) ((zram)->table[(index)].element)
 
 #define zram_set_handle(zram, index, handle_val) \
-	((zram)->table[(index)].handle = (handle_val))
+	((zram)->table[(index)].element = (unsigned long)(handle_val))
 
 #define zram_get_element(zram, index) ((zram)->table[(index)].element)
 
