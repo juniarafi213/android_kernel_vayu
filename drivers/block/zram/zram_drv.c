@@ -35,6 +35,9 @@
 #include <linux/cpuhotplug.h>
 
 #include "zram_drv.h"
+#ifdef CONFIG_HYBRIDSWAP
+#include "hybridswap/hybridswap.h"
+#endif
 
 static DEFINE_IDR(zram_index_idr);
 /* idr index must be protected */
@@ -1289,6 +1292,10 @@ static void zram_free_page(struct zram *zram, size_t index)
 		atomic64_dec(&zram->stats.huge_pages);
 	}
 
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	hybridswap_untrack(zram, index);
+#endif
+
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
 		zram_clear_flag(zram, index, ZRAM_WB);
 		free_block_bdev(zram, zram_get_element(zram, index));
@@ -1330,6 +1337,17 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 	void *src, *dst;
 
 	zram_slot_lock(zram, index);
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	if (likely(!bio)) {
+		ret = hybridswap_fault_out(zram, index);
+		if (unlikely(ret)) {
+			pr_err("search in hybridswap failed! err=%d, page=%u\n",
+					ret, index);
+			zram_slot_unlock(zram, index);
+			return ret;
+		}
+	}
+#endif
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
 		struct bio_vec bvec;
 
@@ -1536,6 +1554,9 @@ out:
 		zram_set_entry(zram, index, entry);
 		zram_set_obj_size(zram, index, comp_len);
 	}
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	hybridswap_track(zram, index, page ? page->mem_cgroup : NULL);
+#endif
 	zram_slot_unlock(zram, index);
 
 	/* Update stats */
@@ -1742,6 +1763,14 @@ static void zram_slot_free_notify(struct block_device *bdev,
 		atomic64_inc(&zram->stats.miss_free);
 		return;
 	}
+
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	if (!hybridswap_delete(zram, index)) {
+		zram_slot_unlock(zram, index);
+		atomic64_inc(&zram->stats.miss_free);
+		return;
+	}
+#endif
 
 	zram_free_page(zram, index);
 	zram_slot_unlock(zram, index);
@@ -1963,6 +1992,24 @@ static DEVICE_ATTR_RW(use_dedup);
 #else
 static DEVICE_ATTR_RO(use_dedup);
 #endif
+#ifdef CONFIG_HYBRIDSWAP
+static DEVICE_ATTR_RO(hybridswap_vmstat);
+static DEVICE_ATTR_RW(hybridswap_loglevel);
+static DEVICE_ATTR_RW(hybridswap_enable);
+#endif
+#ifdef CONFIG_HYBRIDSWAP_SWAPD
+static DEVICE_ATTR_RW(hybridswap_swapd_pause);
+#endif
+#ifdef CONFIG_HYBRIDSWAP_CORE
+static DEVICE_ATTR_RW(hybridswap_core_enable);
+static DEVICE_ATTR_RW(hybridswap_loop_device);
+static DEVICE_ATTR_RW(hybridswap_dev_life);
+static DEVICE_ATTR_RW(hybridswap_quota_day);
+static DEVICE_ATTR_RO(hybridswap_report);
+static DEVICE_ATTR_RO(hybridswap_stat_snap);
+static DEVICE_ATTR_RO(hybridswap_meminfo);
+static DEVICE_ATTR_RW(hybridswap_zram_increase);
+#endif
 
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
@@ -1987,6 +2034,24 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_bd_stat.attr,
 #endif
 	&dev_attr_debug_stat.attr,
+#ifdef CONFIG_HYBRIDSWAP
+	&dev_attr_hybridswap_vmstat.attr,
+	&dev_attr_hybridswap_loglevel.attr,
+	&dev_attr_hybridswap_enable.attr,
+#endif
+#ifdef CONFIG_HYBRIDSWAP_SWAPD
+	&dev_attr_hybridswap_swapd_pause.attr,
+#endif
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	&dev_attr_hybridswap_core_enable.attr,
+	&dev_attr_hybridswap_report.attr,
+	&dev_attr_hybridswap_meminfo.attr,
+	&dev_attr_hybridswap_stat_snap.attr,
+	&dev_attr_hybridswap_loop_device.attr,
+	&dev_attr_hybridswap_dev_life.attr,
+	&dev_attr_hybridswap_quota_day.attr,
+	&dev_attr_hybridswap_zram_increase.attr,
+#endif
 	NULL,
 };
 
@@ -2251,6 +2316,12 @@ static int __init zram_init(void)
 		num_devices--;
 	}
 
+#ifdef CONFIG_HYBRIDSWAP
+	ret = hybridswap_pre_init();
+	if (ret)
+		goto out_error;
+#endif
+
 	return 0;
 
 out_error:
@@ -2260,6 +2331,9 @@ out_error:
 
 static void __exit zram_exit(void)
 {
+#ifdef CONFIG_HYBRIDSWAP
+	hybridswap_exit();
+#endif
 	destroy_devices();
 }
 

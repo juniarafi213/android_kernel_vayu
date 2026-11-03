@@ -38,6 +38,7 @@
 #include <linux/cpu.h>
 #include <linux/cpuset.h>
 #include <linux/memory_hotplug.h>
+#include <trace/hooks/mm.h>
 #include <linux/nodemask.h>
 #include <linux/vmalloc.h>
 #include <linux/vmstat.h>
@@ -2947,6 +2948,8 @@ struct page *rmqueue(struct zone *preferred_zone,
 {
 	unsigned long flags;
 	struct page *page;
+
+	trace_android_vh_rmqueue(preferred_zone, zone, order, gfp_flags, alloc_flags, migratetype);
 
 	if (likely(order == 0)) {
 		page = rmqueue_pcplist(preferred_zone, zone, order,

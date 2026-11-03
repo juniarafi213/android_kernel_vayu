@@ -177,6 +177,10 @@ struct mem_cgroup {
 	/* Private memcg ID. Used to ID objects that outlive the cgroup */
 	struct mem_cgroup_id id;
 
+#if defined(CONFIG_HYBRIDSWAP)
+	u64 android_oem_data1;
+#endif
+
 	/* Accounted resources */
 	struct page_counter memory;
 	struct page_counter swap;
