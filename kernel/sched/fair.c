@@ -28,6 +28,7 @@
 #include <linux/sched/topology.h>
 
 #include <linux/latencytop.h>
+#include <linux/rbtree_augmented.h>
 #include <linux/cpumask.h>
 #include <linux/cpuidle.h>
 #include <linux/slab.h>
@@ -1454,11 +1455,6 @@ static void update_curr_fair(struct rq *rq)
 
 	for_each_sched_entity(se)
 		update_curr(cfs_rq_of(se));
-}
-
-static void update_curr_fair(struct rq *rq)
-{
-	update_curr(cfs_rq_of(&rq->curr->se));
 }
 
 static inline void
@@ -4598,6 +4594,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
+static inline int cfs_rq_throttled(struct cfs_rq *cfs_rq);
 
 static inline void check_schedstat_required(void)
 {
@@ -5679,7 +5676,7 @@ static void hrtick_update(struct rq *rq)
 	if (!hrtick_enabled(rq) || curr->sched_class != &fair_sched_class)
 		return;
 
-	if (cfs_rq_of(&curr->se)->nr_running < sched_nr_latency)
+	if (cfs_rq_of(&curr->se)->nr_queued < sched_nr_latency)
 		hrtick_start_fair(rq, curr);
 }
 #else /* !CONFIG_SCHED_HRTICK */
@@ -9071,15 +9068,10 @@ preempt_sync(struct rq *rq, int wake_flags,
 {
 	u64 threshold, delta;
 
-	WARN_ON_ONCE(!(wake_flags & WF_TTWU));
-
 	threshold = sysctl_sched_migration_cost;
 	delta = rq_clock_task(rq) - se->exec_start;
 	if ((s64)delta < 0)
 		delta = 0;
-
-	if (wake_flags & WF_RQ_SELECTED)
-		threshold >>= 2;
 
 	if (entity_before(pse, se) && delta >= threshold)
 		return PREEMPT_WAKEUP_RESCHED;
@@ -9472,8 +9464,7 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 	 * Buddy candidates are cache hot:
 	 */
 	if (sched_feat(CACHE_HOT_BUDDY) && env->dst_rq->nr_running &&
-			(&p->se == cfs_rq_of(&p->se)->next ||
-			 &p->se == cfs_rq_of(&p->se)->last))
+			(&p->se == cfs_rq_of(&p->se)->next))
 		return 1;
 
 	if (sysctl_sched_migration_cost == -1)
