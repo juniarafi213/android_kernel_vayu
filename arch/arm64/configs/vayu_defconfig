@@ -6286,7 +6286,7 @@ CONFIG_RMNET_SHS=y
 #
 # BORE CPU Scheduler
 #
-CONFIG_SCHED_BORE=y
+# CONFIG_SCHED_BORE is not set
 
 #
 # KernelSU-Next Manual Hook
