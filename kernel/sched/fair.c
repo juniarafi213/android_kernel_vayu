@@ -473,6 +473,18 @@ static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
 	return grp->my_q;
 }
 
+static inline int cfs_rq_is_idle(struct cfs_rq *cfs_rq)
+{
+	return cfs_rq->h_nr_idle && (cfs_rq->h_nr_idle == cfs_rq->h_nr_queued);
+}
+
+static inline int se_is_idle(struct sched_entity *se)
+{
+	if (entity_is_task(se))
+		return task_has_idle_policy(task_of(se));
+	return cfs_rq_is_idle(group_cfs_rq(se));
+}
+
 static inline void list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	if (!cfs_rq->on_list) {
@@ -630,6 +642,16 @@ static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
 	return NULL;
 }
 
+static inline int cfs_rq_is_idle(struct cfs_rq *cfs_rq)
+{
+	return 0;
+}
+
+static inline int se_is_idle(struct sched_entity *se)
+{
+	return task_has_idle_policy(task_of(se));
+}
+
 static inline void list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
 {
 }
@@ -674,6 +696,11 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 	if (likely(sched_bore)) delta = scale_slice(delta, se);
 #endif // CONFIG_SCHED_BORE
 	return delta;
+}
+
+static inline u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	return se->slice;
 }
 
 static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
@@ -9196,7 +9223,7 @@ again:
 	return p;
 
 idle:
-	new_tasks = newidle_balance(rq, rf);
+	new_tasks = idle_balance(rq, rf);
 
 	if (new_tasks < 0)
 		return RETRY_TASK;
