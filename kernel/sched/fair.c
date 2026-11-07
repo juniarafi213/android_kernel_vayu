@@ -1261,6 +1261,8 @@ found:
 
 	if (!best)
 		best = __pick_first_entity(cfs_rq);
+	if (!best && cfs_rq->curr && cfs_rq->curr->on_rq)
+		best = cfs_rq->curr;
 
 	return best;
 }
@@ -9207,8 +9209,11 @@ again:
 		update_curr_eevdf(cfs_rq);
 
 	se = pick_next_entity(rq, true);
-	if (!se)
-		goto again;
+	if (!se) {
+		if (cfs_rq->curr && cfs_rq->curr->on_rq)
+			return task_of(cfs_rq->curr);
+		return NULL;
+	}
 
 	return task_of(se);
 }
