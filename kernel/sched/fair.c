@@ -1115,6 +1115,9 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	struct sched_entity *entry;
 	bool leftmost = true;
 
+	WARN_ON_ONCE(&rq_of(cfs_rq)->cfs != cfs_rq);
+	WARN_ON_ONCE(!entity_is_task(se));
+
 	while (*link) {
 		parent = *link;
 		entry = rb_entry(parent, struct sched_entity, run_node);
@@ -1137,6 +1140,9 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	WARN_ON_ONCE(&rq_of(cfs_rq)->cfs != cfs_rq);
+	WARN_ON_ONCE(!entity_is_task(se));
+
 	rb_erase_augmented_cached(&se->run_node, &cfs_rq->tasks_timeline,
 				  &min_vruntime_cb);
 	sum_w_vruntime_sub(cfs_rq, se);
@@ -1252,6 +1258,9 @@ static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq, bool protect)
 found:
 	if (!best || (curr && entity_before(curr, best)))
 		best = curr;
+
+	if (!best)
+		best = __pick_first_entity(cfs_rq);
 
 	return best;
 }
@@ -4646,8 +4655,6 @@ static inline void check_schedstat_required(void)
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
-	bool curr = cfs_rq->curr == se;
-
 	update_curr(cfs_rq);
 
 	update_load_avg(se, UPDATE_TG);
@@ -4663,8 +4670,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
 	check_spread(cfs_rq, se);
-	if (!curr)
-		__enqueue_entity(cfs_rq, se);
 	se->on_rq = 1;
 
 	if (cfs_rq->nr_queued == 1) {
@@ -4768,8 +4773,6 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	clear_buddies(cfs_rq, se);
 
-	if (se != cfs_rq->curr)
-		__dequeue_entity(cfs_rq, se);
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
 
@@ -4811,6 +4814,12 @@ pick_next_entity(struct rq *rq, bool protect)
 	struct sched_entity *se;
 
 	se = pick_eevdf(cfs_rq, protect);
+	if (!se) {
+		se = __pick_first_entity(cfs_rq);
+		if (!se)
+			return NULL;
+	}
+
 	if (se->sched_delayed) {
 		__dequeue_task(rq, task_of(se), DEQUEUE_SLEEP | DEQUEUE_DELAYED);
 		return NULL;
@@ -12825,6 +12834,7 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 			weight = __calc_prop_weight(cfs_rq, se, weight);
 	}
 
+	cfs_rq = &rq->cfs;
 	se = &p->se;
 	cfs_rq->curr = se;
 
